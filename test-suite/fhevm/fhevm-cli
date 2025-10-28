@@ -176,6 +176,17 @@ case $COMMAND in
           log_message="${LIGHT_BLUE}${BOLD}[TEST] USER DECRYPTION${RESET}"
           docker_args+=("-g" "test user decrypt")
           ;;
+        delegate-user-decryption)
+          log_message="${LIGHT_BLUE}${BOLD}[TEST] USER DECRYPTION${RESET}"
+          docker_args+=("-g" "test delegate user decrypt")
+          echo -e "${log_message}"
+          docker exec fhevm-test-suite-e2e-debug "${docker_args[@]}"
+          echo Checking transaction-sender logs for DelegateUserDecryption
+          ./fhevm-cli logs coprocessor-transaction-sender | grep "DelegateUserDecryption txn succeeded"
+          echo Checking transaction-sender logs for RevokeUserDecryptionDelegation
+          ./fhevm-cli logs coprocessor-transaction-sender | grep "RevokeUserDecryptionDelegation txn succeeded"
+          exit 0 # the test has been called unlike other case branch
+          ;;
         public-decryption)
           log_message="${LIGHT_BLUE}${BOLD}[TEST] PUBLIC DECRYPTION${RESET}"
           docker_args+=("-g" "test async decrypt (uint.*|ebytes.* trivial|ebytes64 non-trivial|ebytes256 non-trivial with snapshot|addresses|several addresses)")
