@@ -304,9 +304,8 @@ WITH selected_computations AS (
       SELECT transaction_id
       FROM computations 
       WHERE is_completed = FALSE
-        AND is_error = FALSE
         AND is_allowed = TRUE
-      ORDER BY schedule_order
+      ORDER BY created_at
       LIMIT $1
     ) as c
   )
