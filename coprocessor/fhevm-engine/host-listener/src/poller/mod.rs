@@ -1,6 +1,5 @@
 mod http_client;
 mod metrics;
-pub mod state;
 
 use std::time::Duration;
 
@@ -9,7 +8,7 @@ use alloy::rpc::types::Log;
 use anyhow::{anyhow, Context, Result};
 use sqlx::types::Uuid;
 use tokio::time::sleep;
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 
 use fhevm_engine_common::telemetry;
 use fhevm_engine_common::utils::DatabaseURL;
@@ -36,16 +35,11 @@ pub struct PollerConfig {
     pub batch_size: u64,
     pub poll_interval: Duration,
     pub retry_interval: Duration,
-    pub log_level: Level,
     pub service_name: String,
+    pub max_http_retries: u64,
 }
 
 pub async fn run_poller(config: PollerConfig) -> Result<()> {
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(config.log_level)
-        .finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
-
     if !config.service_name.is_empty() {
         if let Err(err) = telemetry::setup_otlp(&config.service_name) {
             warn!(error = %err, "Failed to setup OTLP");
@@ -60,9 +54,21 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
         acl_address,
         tfhe_address,
         config.retry_interval,
+        config.max_http_retries,
     )?;
 
-    let (chain_id, http_retries) = client.chain_id().await?;
+    let (chain_id, http_retries) = match client.chain_id().await {
+        Ok(res) => res,
+        Err(err) => {
+            error!(
+                error = %err.error,
+                retries = err.retries,
+                "Failed to fetch chain id after retries"
+            );
+            sleep(config.retry_interval).await;
+            return Ok(());
+        }
+    };
     let chain_id_str = chain_id.to_string();
     if http_retries > 0 {
         inc_http_retries(&chain_id_str, http_retries);
@@ -116,7 +122,19 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
     );
 
     loop {
-        let (latest, latest_retries) = client.latest_block_number().await?;
+        let (latest, latest_retries) = match client.latest_block_number().await
+        {
+            Ok(res) => res,
+            Err(err) => {
+                error!(
+                    error = %err.error,
+                    retries = err.retries,
+                    "Failed to fetch latest block number after retries"
+                );
+                sleep(config.retry_interval).await;
+                continue;
+            }
+        };
         let mut http_retries = latest_retries;
 
         let safe_tip = latest.saturating_sub(config.finality_lag);
@@ -143,10 +161,36 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
         let mut db_errors = 0;
 
         for block in (last_caught_up_block + 1)..=target {
-            let (logs, log_retries) = client.logs_for_block(block).await?;
+            let (logs, log_retries) = match client.logs_for_block(block).await {
+                Ok(res) => res,
+                Err(err) => {
+                    http_retries += err.retries;
+                    error!(
+                        block = block,
+                        retries = err.retries,
+                        error = %err.error,
+                        "Failed to fetch logs for block after retries"
+                    );
+                    db_errors += 1;
+                    break;
+                }
+            };
             http_retries += log_retries;
             let (header, header_retries) =
-                client.header_for_block(block).await?;
+                match client.header_for_block(block).await {
+                    Ok(res) => res,
+                    Err(err) => {
+                        http_retries += err.retries;
+                        error!(
+                            block = block,
+                            retries = err.retries,
+                            error = %err.error,
+                            "Failed to fetch header for block after retries"
+                        );
+                        db_errors += 1;
+                        break;
+                    }
+                };
             http_retries += header_retries;
 
             let summary: BlockSummary = header.into();

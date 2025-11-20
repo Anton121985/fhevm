@@ -62,6 +62,13 @@ struct Args {
 
     #[arg(
         long,
+        default_value_t = 10,
+        help = "Maximum number of HTTP/RPC retries before failing an operation"
+    )]
+    max_http_retries: u64,
+
+    #[arg(
+        long,
         value_parser = clap::value_parser!(Level),
         default_value_t = Level::INFO
     )]
@@ -110,8 +117,8 @@ async fn main() -> anyhow::Result<()> {
         batch_size: args.batch_size,
         poll_interval: Duration::from_millis(args.poll_interval_ms),
         retry_interval: Duration::from_millis(args.retry_interval_ms),
-        log_level: args.log_level,
         service_name: args.service_name.clone(),
+        max_http_retries: args.max_http_retries,
     };
 
     run_poller(config).await

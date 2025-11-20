@@ -19,6 +19,7 @@ pub struct HttpChainClient {
     provider: BlockchainProvider,
     addresses: Vec<Address>,
     retry_interval: Duration,
+    max_retries: u64,
 }
 
 impl HttpChainClient {
@@ -27,6 +28,7 @@ impl HttpChainClient {
         acl_address: Option<Address>,
         tfhe_address: Option<Address>,
         retry_interval: Duration,
+        max_retries: u64,
     ) -> Result<Self> {
         let url = Url::parse(rpc_url)
             .context("Invalid rpc_url provided to poller HTTP client")?;
@@ -44,45 +46,77 @@ impl HttpChainClient {
             provider,
             addresses,
             retry_interval,
+            max_retries,
         })
     }
 
-    pub async fn chain_id(&self) -> Result<(u64, u64)> {
-        retry_with_backoff("chain_id", self.retry_interval, || async {
-            self.provider.get_chain_id().await
-        })
+    pub async fn chain_id(
+        &self,
+    ) -> Result<(u64, u64), RetryError<anyhow::Error>> {
+        retry_with_backoff(
+            "chain_id",
+            self.retry_interval,
+            self.max_retries,
+            || async {
+                self.provider.get_chain_id().await.map_err(|e| anyhow!(e))
+            },
+        )
         .await
-        .map_err(|err| anyhow!(err))
     }
 
-    pub async fn latest_block_number(&self) -> Result<(u64, u64)> {
+    pub async fn latest_block_number(
+        &self,
+    ) -> Result<(u64, u64), RetryError<anyhow::Error>> {
         retry_with_backoff(
             "latest_block_number",
             self.retry_interval,
-            || async { self.provider.get_block_number().await },
+            self.max_retries,
+            || async {
+                self.provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| anyhow!(e))
+            },
         )
         .await
-        .map_err(|err| anyhow!(err))
     }
 
-    pub async fn logs_for_block(&self, block: u64) -> Result<(Vec<Log>, u64)> {
+    pub async fn logs_for_block(
+        &self,
+        block: u64,
+    ) -> Result<(Vec<Log>, u64), RetryError<anyhow::Error>> {
         let filter = Self::build_filter(block, &self.addresses);
-        retry_with_backoff("logs_for_block", self.retry_interval, || async {
-            self.provider.get_logs(&filter).await
-        })
+        retry_with_backoff(
+            "logs_for_block",
+            self.retry_interval,
+            self.max_retries,
+            || async {
+                self.provider
+                    .get_logs(&filter)
+                    .await
+                    .map_err(|e| anyhow!(e))
+            },
+        )
         .await
-        .map_err(|err| anyhow!(err))
     }
 
-    pub async fn header_for_block(&self, block: u64) -> Result<(Header, u64)> {
+    pub async fn header_for_block(
+        &self,
+        block: u64,
+    ) -> Result<(Header, u64), RetryError<anyhow::Error>> {
         let block_id = BlockId::number(block);
-        retry_with_backoff("header_for_block", self.retry_interval, || async {
-            match self.provider.get_block(block_id).await {
-                Ok(Some(block)) => Ok(block.header),
-                Ok(None) => Err(anyhow!("Block {block} not found")),
-                Err(err) => Err(anyhow!(err)),
-            }
-        })
+        retry_with_backoff(
+            "header_for_block",
+            self.retry_interval,
+            self.max_retries,
+            || async {
+                match self.provider.get_block(block_id).await {
+                    Ok(Some(block)) => Ok(block.header),
+                    Ok(None) => Err(anyhow!("Block {block} not found")),
+                    Err(err) => Err(anyhow!(err)),
+                }
+            },
+        )
         .await
     }
 
@@ -95,11 +129,21 @@ impl HttpChainClient {
     }
 }
 
+#[derive(Debug)]
+pub struct RetryError<E> {
+    pub error: E,
+    pub retries: u64,
+}
+
+impl RetryError<anyhow::Error> {
+}
+
 async fn retry_with_backoff<T, F, Fut, E>(
     label: &str,
     retry_interval: Duration,
+    max_retries: u64,
     mut op: F,
-) -> Result<(T, u64), E>
+) -> Result<(T, u64), RetryError<E>>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
@@ -110,6 +154,12 @@ where
         match op().await {
             Ok(value) => return Ok((value, retries)),
             Err(err) => {
+                if retries >= max_retries {
+                    return Err(RetryError {
+                        error: err,
+                        retries,
+                    });
+                }
                 retries += 1;
                 warn!(
                     label = label,
@@ -177,8 +227,11 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_clone = attempts.clone();
 
-        let (value, retries) =
-            retry_with_backoff("test_retry", Duration::from_millis(1), || {
+        let (value, retries) = retry_with_backoff(
+            "test_retry",
+            Duration::from_millis(1),
+            5,
+            || {
                 let attempts_clone = attempts_clone.clone();
                 async move {
                     let current = attempts_clone.fetch_add(1, Ordering::SeqCst);
@@ -188,11 +241,35 @@ mod tests {
                         Ok(42)
                     }
                 }
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
 
         assert_eq!(value, 42);
         assert!(retries >= 2);
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_stops_after_max() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+
+        let err = retry_with_backoff(
+            "test_retry_fail",
+            Duration::from_millis(1),
+            2,
+            || {
+                let attempts_clone = attempts_clone.clone();
+                async move {
+                    attempts_clone.fetch_add(1, Ordering::SeqCst);
+                    Err::<i32, _>("always fail")
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.retries, 2);
     }
 }
