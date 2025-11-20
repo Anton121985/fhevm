@@ -922,7 +922,15 @@ async fn db_insert_block_no_retry(
             is_allowed,
             ..tfhe_log
         };
-        db.insert_tfhe_event(&mut tx, &tfhe_log).await?;
+        let inserted = db.insert_tfhe_event(&mut tx, &tfhe_log).await?;
+        if block_logs.catchup && inserted {
+            warn!(
+                tfhe_log = ?tfhe_log,
+                block = ?block_logs.summary,
+                nb_events = block_logs.logs.len(),
+                "Missed event detected by catchup",
+            );
+        }
     }
     db.mark_block_as_valid(&mut tx, &block_logs.summary).await?;
     tx.commit().await

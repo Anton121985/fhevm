@@ -200,7 +200,7 @@ impl Database {
         fhe_operation: FheOperation,
         scalar_byte: &FixedBytes<1>,
         log: &LogTfhe,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let bucket = self
             .sort_computation_into_bucket(
                 result,
@@ -236,7 +236,7 @@ impl Database {
         fhe_operation: FheOperation,
         scalar_byte: &FixedBytes<1>,
         log: &LogTfhe,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let bucket = self
             .sort_computation_into_bucket(
                 result,
@@ -270,7 +270,7 @@ impl Database {
         scalar_byte: &FixedBytes<1>,
         log: &LogTfhe,
         bucket: &Handle,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let is_scalar = !scalar_byte.is_zero();
         let output_handle = result.to_vec();
         let query = sqlx::query!(
@@ -297,7 +297,7 @@ impl Database {
             log.transaction_hash.map(|txh| txh.to_vec()),
             log.is_allowed,
         );
-        query.execute(tx.deref_mut()).await.map(|_| ())
+        query.execute(tx.deref_mut()).await.map(|result| result.rows_affected() > 0)
     }
 
     async fn sort_computation_into_bucket(
@@ -353,7 +353,7 @@ impl Database {
         &self,
         tx: &mut Transaction<'_>,
         log: &LogTfhe,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         use TfheContract as C;
         use TfheContractEvents as E;
         const HAS_SCALAR : FixedBytes::<1> = FixedBytes([1]); // if any dependency is a scalar.
@@ -437,7 +437,7 @@ impl Database {
             | E::Initialized(_)
             | E::Upgraded(_)
             | E::VerifyInput(_)
-            => Ok(()),
+            => Ok(false),
         }
     }
 
@@ -482,7 +482,7 @@ impl Database {
         event: &Log<AclContractEvents>,
         transaction_hash: &Option<Handle>,
         block_number: &Option<u64>,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let data = &event.data;
 
         let transaction_hash = transaction_hash.map(|h| h.to_vec());
@@ -498,12 +498,12 @@ impl Database {
             self.record_transaction_begin(&transaction_hash, block_number)
                 .await;
         }
-
+        let mut inserted = false;
         match data {
             AclContractEvents::Allowed(allowed) => {
                 let handle = allowed.handle.to_vec();
 
-                self.insert_allowed_handle(
+                inserted |= self.insert_allowed_handle(
                     tx,
                     handle.clone(),
                     allowed.account.to_string(),
@@ -512,7 +512,7 @@ impl Database {
                 )
                 .await?;
 
-                self.insert_pbs_computations(
+                inserted |= self.insert_pbs_computations(
                     tx,
                     &vec![handle],
                     transaction_hash,
@@ -532,7 +532,7 @@ impl Database {
                         "Allowed for public decryption"
                     );
 
-                    self.insert_allowed_handle(
+                    inserted |= self.insert_allowed_handle(
                         tx,
                         handle,
                         "".to_string(),
@@ -542,7 +542,7 @@ impl Database {
                     .await?;
                 }
 
-                self.insert_pbs_computations(
+                inserted |= self.insert_pbs_computations(
                     tx,
                     &handles,
                     transaction_hash.clone(),
@@ -612,7 +612,7 @@ impl Database {
             }
         }
         self.tick.update();
-        Ok(())
+        Ok(inserted)
     }
 
     /// Adds handles to the pbs_computations table and alerts the SnS worker
@@ -622,8 +622,9 @@ impl Database {
         tx: &mut Transaction<'_>,
         handles: &Vec<Vec<u8>>,
         transaction_id: Option<Vec<u8>>,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let tenant_id = self.tenant_id;
+        let mut inserted = false;
         for handle in handles {
             let query = sqlx::query!(
                 "INSERT INTO pbs_computations(tenant_id, handle, transaction_id) VALUES($1, $2, $3)
@@ -632,9 +633,9 @@ impl Database {
                 handle,
                 transaction_id
             );
-            query.execute(tx.deref_mut()).await?;
+            inserted |= query.execute(tx.deref_mut()).await?.rows_affected() > 0;
         }
-        Ok(())
+        Ok(inserted)
     }
 
     /// Add the handle to the allowed_handles table
@@ -645,7 +646,7 @@ impl Database {
         account_address: String,
         event_type: AllowEvents,
         transaction_id: Option<Vec<u8>>,
-    ) -> Result<(), SqlxError> {
+    ) -> Result<bool, SqlxError> {
         let tenant_id = self.tenant_id;
         let query = sqlx::query!(
             "INSERT INTO allowed_handles(tenant_id, handle, account_address, event_type, transaction_id) VALUES($1, $2, $3, $4, $5)
@@ -656,8 +657,8 @@ impl Database {
             event_type as i16,
             transaction_id
         );
-        query.execute(tx.deref_mut()).await?;
-        Ok(())
+        let inserted = query.execute(tx.deref_mut()).await?.rows_affected() > 0;
+        Ok(inserted)
     }
 
     async fn record_transaction_begin(
