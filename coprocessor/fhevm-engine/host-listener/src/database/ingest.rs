@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use alloy::primitives::Address;
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEventInterface;
-use fhevm_engine_common::types::Handle;
-use tracing::{error, info};
+use fhevm_engine_common::types::Handle as RawHandle;
+use tracing::{debug, error};
 
 use crate::cmd::block_history::BlockSummary;
 use crate::contracts::{AclContract, TfheContract};
@@ -25,18 +25,22 @@ pub async fn ingest_block_logs(
     tfhe_address: Option<Address>,
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.new_transaction().await?;
-    let mut is_allowed = HashSet::<Handle>::new();
+    // RawHandle is Vec<u8> (public-facing), while contract events expose
+    // fixed-size handles; we normalize to Vec<u8> for the allowed set.
+    let mut is_allowed = HashSet::<RawHandle>::new();
     let mut tfhe_event_log = vec![];
 
     for log in &block_logs.logs {
-        let is_acl_address = acl_address
-            .map(|addr| addr == log.inner.address)
-            .unwrap_or(false);
-        if acl_address.is_none() || is_acl_address {
+        let matches_acl =
+            acl_address.map_or(true, |addr| addr == log.inner.address);
+        let matches_tfhe =
+            tfhe_address.map_or(true, |addr| addr == log.inner.address);
+
+        if matches_acl {
             if let Ok(event) =
                 AclContract::AclContractEvents::decode_log(&log.inner)
             {
-                info!(acl_event = ?event, "ACL event");
+                debug!(acl_event = ?event, "ACL event");
                 for handle in acl_result_handles(&event) {
                     is_allowed.insert(handle.to_vec());
                 }
@@ -51,10 +55,7 @@ pub async fn ingest_block_logs(
             }
         }
 
-        let is_tfhe_address = tfhe_address
-            .map(|addr| addr == log.inner.address)
-            .unwrap_or(false);
-        if tfhe_address.is_none() || is_tfhe_address {
+        if matches_tfhe {
             if let Ok(event) =
                 TfheContract::TfheContractEvents::decode_log(&log.inner)
             {
@@ -69,7 +70,7 @@ pub async fn ingest_block_logs(
             }
         }
 
-        if is_acl_address || is_tfhe_address {
+        if matches_acl || matches_tfhe {
             error!(
                 event_address = ?log.inner.address,
                 acl_address = ?acl_address,
@@ -81,7 +82,7 @@ pub async fn ingest_block_logs(
     }
 
     for tfhe_log in tfhe_event_log {
-        info!(tfhe_log = ?tfhe_log, "TFHE event");
+        debug!(tfhe_log = ?tfhe_log, "TFHE event");
         let is_allowed =
             if let Some(result_handle) = tfhe_result_handle(&tfhe_log.event) {
                 is_allowed.contains(&result_handle.to_vec())
@@ -97,4 +98,34 @@ pub async fn ingest_block_logs(
 
     db.mark_block_as_valid(&mut tx, &block_logs.summary).await?;
     tx.commit().await
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy::primitives::Address;
+
+    #[test]
+    fn address_matching_rules() {
+        let acl_addr = Address::from([1u8; 20]);
+        let tfhe_addr = Address::from([2u8; 20]);
+
+        let matches_acl = Some(acl_addr).map_or(true, |addr| addr == acl_addr);
+        assert!(matches_acl);
+
+        let matches_acl_wrong =
+            Some(acl_addr).map_or(true, |addr| addr == tfhe_addr);
+        assert!(!matches_acl_wrong);
+
+        let matches_tfhe =
+            Some(tfhe_addr).map_or(true, |addr| addr == tfhe_addr);
+        assert!(matches_tfhe);
+
+        let matches_tfhe_wrong =
+            Some(tfhe_addr).map_or(true, |addr| addr == acl_addr);
+        assert!(!matches_tfhe_wrong);
+
+        let matches_when_none =
+            None::<Address>.map_or(true, |addr| addr == tfhe_addr);
+        assert!(matches_when_none);
+    }
 }

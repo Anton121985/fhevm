@@ -1,10 +1,14 @@
-use std::time::Duration;
+use std::{
+    fmt::{Debug, Display},
+    future::Future,
+    time::Duration,
+};
 
 use alloy::eips::BlockId;
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::{Filter, Header, Log};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use reqwest::Url;
 use tokio::time::sleep;
 use tracing::warn;
@@ -18,7 +22,7 @@ pub struct HttpChainClient {
 }
 
 impl HttpChainClient {
-    pub async fn new(
+    pub fn new(
         rpc_url: &str,
         acl_address: Option<Address>,
         tfhe_address: Option<Address>,
@@ -44,87 +48,42 @@ impl HttpChainClient {
     }
 
     pub async fn chain_id(&self) -> Result<(u64, u64)> {
-        let mut retries = 0;
-        loop {
-            match self.provider.get_chain_id().await {
-                Ok(chain_id) => return Ok((chain_id, retries)),
-                Err(err) => {
-                    retries += 1;
-                    warn!(
-                        error = %err,
-                        retries = retries,
-                        "Failed to fetch chain id, retrying"
-                    );
-                }
-            }
-            sleep(self.retry_interval).await;
-        }
+        retry_with_backoff("chain_id", self.retry_interval, || async {
+            self.provider.get_chain_id().await
+        })
+        .await
+        .map_err(|err| anyhow!(err))
     }
 
     pub async fn latest_block_number(&self) -> Result<(u64, u64)> {
-        let mut retries = 0;
-        loop {
-            match self.provider.get_block_number().await {
-                Ok(latest) => return Ok((latest, retries)),
-                Err(err) => {
-                    retries += 1;
-                    warn!(
-                        error = %err,
-                        retries = retries,
-                        "Failed to fetch latest block number, retrying"
-                    );
-                }
-            }
-            sleep(self.retry_interval).await;
-        }
+        retry_with_backoff(
+            "latest_block_number",
+            self.retry_interval,
+            || async { self.provider.get_block_number().await },
+        )
+        .await
+        .map_err(|err| anyhow!(err))
     }
 
     pub async fn logs_for_block(&self, block: u64) -> Result<(Vec<Log>, u64)> {
-        let mut retries = 0;
         let filter = Self::build_filter(block, &self.addresses);
-        loop {
-            match self.provider.get_logs(&filter).await {
-                Ok(logs) => return Ok((logs, retries)),
-                Err(err) => {
-                    retries += 1;
-                    warn!(
-                        block = block,
-                        error = %err,
-                        retries = retries,
-                        "Failed to fetch logs for block, retrying"
-                    );
-                }
-            }
-            sleep(self.retry_interval).await;
-        }
+        retry_with_backoff("logs_for_block", self.retry_interval, || async {
+            self.provider.get_logs(&filter).await
+        })
+        .await
+        .map_err(|err| anyhow!(err))
     }
 
     pub async fn header_for_block(&self, block: u64) -> Result<(Header, u64)> {
-        let mut retries = 0;
         let block_id = BlockId::number(block);
-        loop {
+        retry_with_backoff("header_for_block", self.retry_interval, || async {
             match self.provider.get_block(block_id).await {
-                Ok(Some(block)) => return Ok((block.header, retries)),
-                Ok(None) => {
-                    retries += 1;
-                    warn!(
-                        block = block,
-                        retries = retries,
-                        "Block not found, retrying"
-                    );
-                }
-                Err(err) => {
-                    retries += 1;
-                    warn!(
-                        block = block,
-                        error = %err,
-                        retries = retries,
-                        "Failed to fetch block header, retrying"
-                    );
-                }
+                Ok(Some(block)) => Ok(block.header),
+                Ok(None) => Err(anyhow!("Block {block} not found")),
+                Err(err) => Err(anyhow!(err)),
             }
-            sleep(self.retry_interval).await;
-        }
+        })
+        .await
     }
 
     pub(crate) fn build_filter(block: u64, addresses: &[Address]) -> Filter {
@@ -136,10 +95,41 @@ impl HttpChainClient {
     }
 }
 
+async fn retry_with_backoff<T, F, Fut, E>(
+    label: &str,
+    retry_interval: Duration,
+    mut op: F,
+) -> Result<(T, u64), E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: Display + Debug,
+{
+    let mut retries = 0;
+    loop {
+        match op().await {
+            Ok(value) => return Ok((value, retries)),
+            Err(err) => {
+                retries += 1;
+                warn!(
+                    label = label,
+                    retries = retries,
+                    error = %err,
+                    "Retrying HTTP/RPC call"
+                );
+            }
+        }
+        sleep(retry_interval).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn filter_builder_sets_addresses_and_block_bounds() {
@@ -180,5 +170,29 @@ mod tests {
         let filter = HttpChainClient::build_filter(1, &[]);
         let serialized = serde_json::to_value(filter).unwrap();
         assert!(serialized.get("address").is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_retries_then_succeeds() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+
+        let (value, retries) =
+            retry_with_backoff("test_retry", Duration::from_millis(1), || {
+                let attempts_clone = attempts_clone.clone();
+                async move {
+                    let current = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                    if current < 2 {
+                        Err("temporary failure")
+                    } else {
+                        Ok(42)
+                    }
+                }
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(value, 42);
+        assert!(retries >= 2);
     }
 }

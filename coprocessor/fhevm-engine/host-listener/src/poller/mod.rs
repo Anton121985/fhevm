@@ -21,9 +21,6 @@ use crate::poller::http_client::HttpChainClient;
 use crate::poller::metrics::{
     inc_blocks_processed, inc_db_errors, inc_http_retries,
 };
-use crate::poller::state::{
-    get_last_caught_up_block, set_last_caught_up_block,
-};
 
 const DEFAULT_DEPENDENCE_CACHE_SIZE: u16 = 128;
 const MAX_DB_RETRIES: u64 = 10;
@@ -44,6 +41,11 @@ pub struct PollerConfig {
 }
 
 pub async fn run_poller(config: PollerConfig) -> Result<()> {
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(config.log_level)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+
     if !config.service_name.is_empty() {
         if let Err(err) = telemetry::setup_otlp(&config.service_name) {
             warn!(error = %err, "Failed to setup OTLP");
@@ -58,8 +60,7 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
         acl_address,
         tfhe_address,
         config.retry_interval,
-    )
-    .await?;
+    )?;
 
     let (chain_id, http_retries) = client.chain_id().await?;
     let chain_id_str = chain_id.to_string();
@@ -91,15 +92,14 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
         ));
     }
 
-    let pool = db.pool.read().await.clone();
-    let initial_anchor =
-        get_last_caught_up_block(&pool, chain_id as i64).await?;
+    let initial_anchor = db.get_last_caught_up_block(chain_id as i64).await?;
     let mut last_caught_up_block = match initial_anchor {
         Some(block) => u64::try_from(block)
             .context("last_caught_up_block cannot be negative")?,
         None => {
             let initial = db.read_last_valid_block().await.unwrap_or(0);
-            set_last_caught_up_block(&pool, chain_id as i64, initial).await?;
+            db.set_last_caught_up_block(chain_id as i64, initial)
+                .await?;
             u64::try_from(initial)
                 .context("initial last_caught_up_block cannot be negative")?
         }
@@ -189,7 +189,7 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
         if new_anchor > last_caught_up_block {
             let anchor = i64::try_from(new_anchor)
                 .context("last_caught_up_block overflow")?;
-            set_last_caught_up_block(&pool, chain_id as i64, anchor).await?;
+            db.set_last_caught_up_block(chain_id as i64, anchor).await?;
             last_caught_up_block = new_anchor;
         }
 
