@@ -153,7 +153,7 @@ This software is distributed under the **BSD-3-Clause-Clear** license. Read [thi
 
 **What do I need to do if I want to use Zama’s technology for commercial purposes?**
 
-> To commercially use Zama’s technology you need to be granted Zama’s patent license. Please contact us at hello@zama.ai for more information.
+> To commercially use Zama’s technology you need to be granted Zama’s patent license. Please contact us at hello@zama.ai for more information
 
 **Do you file IP on your technology?**
 
