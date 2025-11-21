@@ -43,3 +43,16 @@ pub(crate) fn inc_http_retries(chain_id: &str, count: u64) {
 pub(crate) fn inc_db_errors(chain_id: &str, count: u64) {
     DB_ERRORS.with_label_values(&[chain_id]).inc_by(count);
 }
+
+pub(crate) static RPC_ERRORS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        "host_poller_rpc_errors",
+        "Number of HTTP/RPC errors encountered by the host-listener poller",
+        &["chain_id"]
+    )
+    .unwrap()
+});
+
+pub(crate) fn inc_rpc_errors(chain_id: &str, count: u64) {
+    RPC_ERRORS.with_label_values(&[chain_id]).inc_by(count);
+}

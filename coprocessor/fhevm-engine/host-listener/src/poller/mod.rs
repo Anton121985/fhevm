@@ -18,7 +18,7 @@ use crate::database::ingest::{ingest_block_logs, BlockLogs};
 use crate::database::tfhe_event_propagate::Database;
 use crate::poller::http_client::HttpChainClient;
 use crate::poller::metrics::{
-    inc_blocks_processed, inc_db_errors, inc_http_retries,
+    inc_blocks_processed, inc_db_errors, inc_http_retries, inc_rpc_errors,
 };
 
 const DEFAULT_DEPENDENCE_CACHE_SIZE: u16 = 128;
@@ -36,9 +36,11 @@ pub struct PollerConfig {
     pub poll_interval: Duration,
     pub retry_interval: Duration,
     pub service_name: String,
+    /// Maximum number of HTTP/RPC retries after the initial attempt.
     pub max_http_retries: u64,
 }
-
+/// Run the poller. Logging/tracing must be configured by the caller (binary).
+/// Error handling: chain_id failure at startup is treated as fatal for this run (log, sleep retry_interval, return Ok(())). latest_block_number failures are treated as transient (log, sleep, continue loop). Per-block log/header failures mark the batch failed, increment rpc_errors, and skip the rest of the batch.
 pub async fn run_poller(config: PollerConfig) -> Result<()> {
     if !config.service_name.is_empty() {
         if let Err(err) = telemetry::setup_otlp(&config.service_name) {
@@ -159,6 +161,7 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
 
         let mut processed_blocks = 0;
         let mut db_errors = 0;
+        let mut rpc_errors = 0;
 
         for block in (last_caught_up_block + 1)..=target {
             let (logs, log_retries) = match client.logs_for_block(block).await {
@@ -171,7 +174,7 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
                         error = %err.error,
                         "Failed to fetch logs for block after retries"
                     );
-                    db_errors += 1;
+                    rpc_errors += 1;
                     break;
                 }
             };
@@ -187,7 +190,7 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
                             error = %err.error,
                             "Failed to fetch header for block after retries"
                         );
-                        db_errors += 1;
+                        rpc_errors += 1;
                         break;
                     }
                 };
@@ -244,6 +247,9 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
         if db_errors > 0 {
             inc_db_errors(&chain_id_str, db_errors);
         }
+        if rpc_errors > 0 {
+            inc_rpc_errors(&chain_id_str, rpc_errors);
+        }
 
         info!(
             chain_id = chain_id,
@@ -255,6 +261,7 @@ pub async fn run_poller(config: PollerConfig) -> Result<()> {
             blocks_failed = blocks_failed,
             http_retries = http_retries,
             db_errors = db_errors,
+            rpc_errors = rpc_errors,
             "Poller iteration complete"
         );
 

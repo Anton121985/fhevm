@@ -135,9 +135,6 @@ pub struct RetryError<E> {
     pub retries: u64,
 }
 
-impl RetryError<anyhow::Error> {
-}
-
 async fn retry_with_backoff<T, F, Fut, E>(
     label: &str,
     retry_interval: Duration,
