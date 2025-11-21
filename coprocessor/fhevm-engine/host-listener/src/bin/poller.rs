@@ -5,8 +5,10 @@ use alloy::primitives::Address;
 use anyhow::{anyhow, Context};
 use clap::Parser;
 use sqlx::types::Uuid;
+use tokio_util::sync::CancellationToken;
 use tracing::Level;
 
+use fhevm_engine_common::metrics_server;
 use fhevm_engine_common::utils::DatabaseURL;
 use host_listener::poller::{run_poller, PollerConfig};
 
@@ -63,9 +65,15 @@ struct Args {
     #[arg(
         long,
         default_value_t = 10,
-        help = "Maximum number of HTTP/RPC retries before failing an operation"
+        help = "Maximum number of HTTP/RPC retry attempts (in addition to the initial attempt) before failing an operation"
     )]
     max_http_retries: u64,
+
+    #[arg(
+        long,
+        help = "Address for Prometheus metrics HTTP server (e.g. 0.0.0.0:9100); if unset, metrics server is disabled"
+    )]
+    metrics_addr: Option<String>,
 
     #[arg(
         long,
@@ -106,6 +114,12 @@ async fn main() -> anyhow::Result<()> {
 
     let acl_address = parse_address(&args.acl_contract_address, "acl")?;
     let tfhe_address = parse_address(&args.tfhe_contract_address, "tfhe")?;
+
+    let cancel_token = CancellationToken::new();
+    metrics_server::spawn(
+        args.metrics_addr.clone(),
+        cancel_token.child_token(),
+    );
 
     let config = PollerConfig {
         rpc_url: args.rpc_url.clone(),
