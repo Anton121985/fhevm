@@ -99,33 +99,3 @@ pub async fn ingest_block_logs(
     db.mark_block_as_valid(&mut tx, &block_logs.summary).await?;
     tx.commit().await
 }
-
-#[cfg(test)]
-mod tests {
-    use alloy::primitives::Address;
-
-    #[test]
-    fn address_matching_rules() {
-        let acl_addr = Address::from([1u8; 20]);
-        let tfhe_addr = Address::from([2u8; 20]);
-
-        let matches_acl = Some(acl_addr).map_or(true, |addr| addr == acl_addr);
-        assert!(matches_acl);
-
-        let matches_acl_wrong =
-            Some(acl_addr).map_or(true, |addr| addr == tfhe_addr);
-        assert!(!matches_acl_wrong);
-
-        let matches_tfhe =
-            Some(tfhe_addr).map_or(true, |addr| addr == tfhe_addr);
-        assert!(matches_tfhe);
-
-        let matches_tfhe_wrong =
-            Some(tfhe_addr).map_or(true, |addr| addr == acl_addr);
-        assert!(!matches_tfhe_wrong);
-
-        let matches_when_none =
-            None::<Address>.map_or(true, |addr| addr == tfhe_addr);
-        assert!(matches_when_none);
-    }
-}
