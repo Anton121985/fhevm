@@ -122,16 +122,16 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let config = PollerConfig {
-        rpc_url: args.rpc_url.clone(),
+        rpc_url: args.rpc_url,
         acl_address,
         tfhe_address,
-        database_url: args.database_url.clone(),
+        database_url: args.database_url,
         coprocessor_api_key: args.coprocessor_api_key,
         finality_lag: args.finality_lag,
         batch_size: args.batch_size,
         poll_interval: Duration::from_millis(args.poll_interval_ms),
         retry_interval: Duration::from_millis(args.retry_interval_ms),
-        service_name: args.service_name.clone(),
+        service_name: args.service_name,
         max_http_retries: args.max_http_retries,
     };
 
